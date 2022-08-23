@@ -1,0 +1,667 @@
+---
+title: "Gender and Leadership in Turbulent Times"
+subtitle:  "A Quantitative Analysis of Speeches During COVID-19"
+author: "Mariana Arrieta Yanez"
+date: "4/15/2021"
+output: html_document
+---
+*I would like to acknowledge Sara Dada and her team for their willingness to share the speech data with me. Their [paper](https://gh.bmj.com/content/6/1/e003910) on political and gender analysis of speeches made by government heads served as the starting point of this project. *
+```{r, warning=FALSE, message= FALSE}
+library(tidyverse)
+library(quanteda)
+library(quanteda.dictionaries)
+library(quanteda.textmodels)
+library(ggplot2)
+library(lubridate)
+library(rstatix)
+library(ggpubr)
+library("topicmodels", quietly = TRUE, warn.conflicts = FALSE, verbose = FALSE)
+library(ldatuning)
+library(RColorBrewer)
+```
+
+```{r, warning=FALSE, message= FALSE}
+#Load data
+df <- read_csv("Speech_data.csv")
+
+#Create vector with the name of the countries in which the leaders are female 
+countries_female_leader <- c("Bangladesh", "Bolivia", "Belgium", "Finland", "Germany", "New Zealand", "Norway", "Scotland", "Sint Maarten", "Taiwan")
+
+#Add column that specifies gender
+df <- df %>%
+  mutate(gender = ifelse(df$country %in% countries_female_leader, "F", "M"))%>%
+  mutate(gender = as.factor(gender)) %>%
+  drop_na()
+
+#Generate the corpus
+speech_corpus <- corpus(df, text_field = "speech", docvars = data.frame(gender =df$gender))
+
+#Create a meaningful document ID
+docid <- paste(df$date, 
+               df$name, sep = " ")
+docnames(speech_corpus) <- docid
+
+df2 <- df %>% group_by(name) %>% mutate(count = n())
+
+```
+
+### 1. Linguistic Features
+#### 1.1 Speech length
+```{r,warning=FALSE, message= FALSE}
+#Subset corpus by gender
+speech_f <- corpus_subset(speech_corpus, gender == "F")
+speech_m <- corpus_subset(speech_corpus, gender == "M")
+#Get number of words per speech and store them in dataframes
+speech_f <-as.data.frame(ntoken(speech_f))  %>%
+  mutate(gender = "F") %>%
+  rename(n_words = 'ntoken(speech_f)')
+
+speech_m <- as.data.frame(ntoken(speech_m)) %>%
+  mutate(gender = "M")  %>%
+  rename(n_words = 'ntoken(speech_m)')
+
+#Combine both dataframes
+word_count_df <- rbind(speech_f, speech_m) %>%
+  mutate(gender = as.factor(gender))
+
+#Get the mean for the speechesacross gender
+mu_f <- mean(speech_f$n_words)
+mu_m <- mean(speech_m$n_words)
+mu <- c(mu_f, mu_m)
+gender<- c("F", "M")
+mu_df <- data.frame(mu, gender) %>%
+  mutate(delta= as.factor(gender))
+
+#Plot a histogram to see the cosine similarity score distribution
+ggplot(word_count_df, aes(x=n_words, color= gender, fill= gender)) +  
+  geom_histogram(aes(y=..density..), position="identity", binwidth = 300, alpha=0.5)+
+  geom_density(alpha=0.4)+
+  geom_vline(data=mu_df, aes(xintercept=mu, color=gender),
+             linetype="dashed")+
+  scale_color_manual(values=c("#DA0431", "#56B4E9"))+
+scale_fill_manual(values=c("#DA0431", "#56B4E9"), )+
+  labs(x="Word Count", y = "Density", fill = "", color = "")+
+  annotate("text", x = 1550, y = 0.00070, label = "μ =  1490", angle = 270)+
+  annotate("text", x = 1700, y = 0.00070, label = "μ =  1645", angle = 270)+
+theme_classic() +
+  theme(legend.position="top")
+
+```
+
+#### 1.2 Lexical diversity 
+```{r}
+#Generate DFMs
+speech_dfm_f <- corpus_subset(speech_corpus, gender == "F") %>%
+dfm(remove = stopwords("en"))
+
+speech_dfm_m <- corpus_subset(speech_corpus, gender == "M")%>%
+dfm(remove = stopwords("en"))
+
+#Get different measures of lexical diversity
+tstat_lexdiv_f <- textstat_lexdiv(speech_dfm_f, measure = c("TTR", "CTTR","Maas", "K"))
+tstat_lexdiv_m <- textstat_lexdiv(speech_dfm_m, measure = c("TTR", "CTTR","Maas", "K"))
+#Lexical diversity
+tstat_lexdiv_f %>%
+  summarise(across(TTR:K, mean))
+
+tstat_lexdiv_m %>%
+  summarise(across(TTR:K, mean))
+
+tstat_lexdiv_df <- as.data.frame(tstat_lexdiv_f) %>%
+  select(TTR, Maas) %>%
+  mutate(gender = "F")
+
+tstat_lexdiv_df2 <- as.data.frame(tstat_lexdiv_m) %>%
+  select(TTR, Maas) %>%
+  mutate(gender = "M")
+
+tstat_lexdiv_df <- rbind(tstat_lexdiv_df, tstat_lexdiv_df2)
+t.test(TTR ~ gender, data = tstat_lexdiv_df)
+t.test(Maas ~ gender, data = tstat_lexdiv_df)
+
+```
+
+#### 1.3 Use of pronouns
+```{r}
+#Create dictionary with pronouns
+myThes <- dictionary(list(I = c("I", "me", "my", "mine", "myself"),
+                          We = c("we", "us", "our", "ours", "ourselves"),
+                               You = c("you", "your", "yours", "yourself", "yourselves"),
+                               They = c("they", "them", "their", "theirs", "themselves")))
+
+#Generate DFMs with the dictionary
+pronouns_dfm_f <- corpus_subset(speech_corpus, gender == "F") %>%
+dfm(dictionary = myThes) %>%
+convert(to = "data.frame")
+
+pronouns_dfm_m <- corpus_subset(speech_corpus, gender == "M")%>%
+dfm(dictionary = myThes)%>%
+convert(to = "data.frame")
+
+#Get date vector
+dates <- df %>%
+filter(gender == "F") %>%
+select(date)
+#Add a date column
+pronouns_dfm_f$dates <- dmy(dates$date)
+
+#Pivot longer
+pronouns_dfm_f <- pronouns_dfm_f %>%
+pivot_longer(!c(doc_id, dates), names_to = "pronouns", values_to = "count") %>%
+mutate(gender = "Female Leaders") 
+#Repeat for df with men's speeches
+dates <- df %>%
+filter(gender == "M") %>%
+select(date)
+
+pronouns_dfm_m$dates <- dmy(dates$date)
+
+pronouns_dfm_m <- pronouns_dfm_m %>%
+pivot_longer(!c(doc_id, dates), names_to = "pronouns", values_to = "count")%>%
+mutate(gender = "Male Leaders") 
+
+pronouns_df <- rbind(pronouns_dfm_f, pronouns_dfm_m)%>%
+mutate(gender = as.factor(gender))
+#Plot the results
+
+ggplot(pronouns_df, aes(x=pronouns, y=count, fill=gender)) + 
+    geom_boxplot() +
+    facet_wrap(~pronouns, scale="free", labeller = labeller(pronouns = 
+    c("I" = "I and its variants",
+      "You" = "You and its variants",
+      "They" = "They and its variants", 
+      "We" = "We and its variants"))) +
+  scale_fill_manual(values=c("#DA0431", "#56B4E9"))+
+  labs(y= "Pronoun Count", x= "Pronoun and its Variants", fill = "")+
+  theme_classic()+
+  theme(legend.position="top")
+```
+
+
+```{r}
+#T-test
+#I
+i_df<-pronouns_df %>%
+  filter(pronouns == "I") %>%
+  select(count, gender)
+
+t.test(count~gender , data =i_df)
+#You
+you_df<-pronouns_df %>%
+  filter(pronouns == "You") %>%
+  select(count, gender)
+
+t.test(count~gender , data =you_df)
+
+#We
+we_df<-pronouns_df %>%
+  filter(pronouns == "We") %>%
+  select(count, gender)
+
+t.test(count~gender , data =we_df)
+#They
+they_df<-pronouns_df %>%
+  filter(pronouns == "They") %>%
+  select(count, gender)
+
+t.test(count~gender , data =they_df)
+
+#Understand appearances of the word day
+kwic(speech_corpus, pattern = "they", valuetype = "fixed", window = 5)
+```
+### 2. Dictionary Methods
+#### 2.1 Sentiment Analysis
+```{r, warning=FALSE}
+
+#Collapse corpus into 2 documents
+split_dfm <- dfm(speech_corpus, groups = "gender")
+# turn word counts into proportions, this accounts for speech length
+split_dfm <- dfm_weight(split_dfm, scheme="prop")
+
+#Load dictionary
+data(data_dictionary_geninqposneg)
+
+pos.words <- data_dictionary_geninqposneg[['positive']]
+neg.words <- data_dictionary_geninqposneg[['negative']]
+
+#Apply Augmented General Inquirer _Positiv_ and _Negativ_  dictionary
+sent_dictionary <- dictionary(list(positive = pos.words,
+                          negative = neg.words))
+
+sent <- dfm_lookup(split_dfm, dictionary = sent_dictionary)
+#Calculate sentiment score
+sent <- convert(sent, to= "data.frame") %>%
+  rename(gender= doc_id)%>%
+  mutate(gender = as.factor(gender)) %>%
+  mutate(score = positive - negative)
+
+ggplot(data=sent, aes(x=gender, y=score, fill=gender)) +
+  scale_fill_manual(values=c("#DA0431", "#56B4E9"), name = "Gender")+
+  geom_bar(stat="identity")+
+  labs(title="Sentiment in Speeches Made by Heads of Government", subtitle= "February 27, 2020 - April 16, 2020", x="Gender", y = "Sentiment Score")+
+  theme_minimal()
+
+```
+#### 2.2 Moral Foundations Dicitionary
+```{r}
+#Scale dfms
+speech_dfm_f_prop <- dfm_weight(speech_dfm_f, scheme  = "prop")
+speech_dfm_m_prop <- dfm_weight(speech_dfm_m, scheme  = "prop")
+#Moral Foundations Dictionary
+data_dictionary_MFD <- data_dictionary_MFD
+# Apply dictionary using `dfm_lookup()` function:
+dfm_f_mfd <- dfm_lookup(speech_dfm_f_prop, dictionary = data_dictionary_MFD)
+dfm_m_mfd <- dfm_lookup(speech_dfm_m_prop, dictionary = data_dictionary_MFD)
+#Create dataframe to get the mean of the proportion of words in each category
+df_f <- convert(dfm_f_mfd, to ="data.frame")%>%
+  select(-doc_id)
+#Remove rows that only have zeros
+df_f <- df_f[rowSums(df_f[])>0,]
+#Get the mean
+df_f <- df_f %>%
+summarise(across(care.virtue:sanctity.vice, mean)) %>%
+pivot_longer(cols= care.virtue:sanctity.vice, names_to = "mean_value") %>%
+mutate(gender = "F")
+#Create dataframe to get the mean of the proportion of words in each category
+df_m <- convert(dfm_m_mfd, to ="data.frame")%>%
+  select(-doc_id)
+#Remove rows that only have zeros
+df_m <- df_m[rowSums(df_m[])>0,]
+#Get the mean
+df_m <- df_m %>%
+summarise(across(care.virtue:sanctity.vice, mean)) %>%
+pivot_longer(cols= care.virtue:sanctity.vice, names_to = "mean_value") %>%
+mutate(gender = "M")
+#Combine both dataframes
+df_comb <- rbind(df_f, df_m)
+#Transform delta to a categorical variable
+df_comb$gender <- as.factor(df_comb$gender)
+#Plot the results
+p<- ggplot(data=df_comb, aes(x= mean_value, y=value, fill=gender)) +
+geom_bar(stat="identity", color="black", position=position_dodge())+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+p + scale_fill_manual(values=c("#DA0431", "#56B4E9"))
+```
+
+```{r}
+#RID  dictionary
+data_dictionary_RID <- data_dictionary_RID
+RID_prim <- data_dictionary_RID$PRIMARY
+RID_emotions <- data_dictionary_RID$EMOTIONS
+RID_secondary <- data_dictionary_RID$SECONDARY
+#Divide dfm by gender
+by_gender_dfm <- speech_corpus %>%
+  tokens(remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_remove(stopwords("en")) %>% #padding prevents the formation of non-sense bigrams
+  dfm(groups = "gender", remove = c("st"))
+
+#Scale dfms
+speech_dfm_prop <- dfm_weight(by_gender_dfm, scheme  = "prop")
+
+#EMOTION
+# Apply dictionary using `dfm_lookup()` function:
+dfm_em <- dfm_lookup(speech_dfm_prop, dictionary = RID_emotions)
+
+#Create dataframe to get the mean of the proportion of words in each category by gender
+df_em <- convert(dfm_em, to ="data.frame")
+df_em <- df_em %>%
+  pivot_longer(!doc_id, names_to = "dict_item", values_to = "prop") %>%
+  mutate(type="Emotion-based")
+
+#PRIMARY
+# Apply dictionary using `dfm_lookup()` function:
+dfm_pr <- dfm_lookup(speech_dfm_prop, dictionary = RID_prim)
+
+#Create dataframe to get the mean of the proportion of words in each category by gender
+df_pr <- convert(dfm_pr, to ="data.frame")
+
+df_pr <- df_pr %>%
+  pivot_longer(!doc_id, names_to = "dict_item", values_to = "prop") %>%
+  mutate(type="Image-based")
+#SECONDARY
+# Apply dictionary using `dfm_lookup()` function:
+dfm_sec <- dfm_lookup(speech_dfm_prop, dictionary = RID_secondary)
+
+#Create dataframe to get the mean of the proportion of words in each category by gender
+df_sec <- convert(dfm_sec, to ="data.frame")
+
+df_sec <- df_sec %>%
+  pivot_longer(!doc_id, names_to = "dict_item", values_to = "prop") %>%
+  mutate(type="Concept-based")
+
+#combine
+df_comb <- rbind(df_em, df_pr, df_sec)
+
+#Comparisons
+dt_result <- df_comb %>% group_by(type) %>% do(tidy(t.test(prop~doc_id, data=.)))
+
+dt_result
+
+ggplot(df_comb, aes(x=type, y=prop, fill=doc_id)) + 
+    geom_boxplot() +
+    facet_wrap(~type, scale="free") +
+  scale_fill_manual(values=c("#DA0431", "#56B4E9"))+
+  labs(y= "Proportion of Words", x= "Regressive Imagery Dictionary Categories", fill = "Gender")+
+  theme_classic()
+```
+
+```{r}
+#T-test
+#Concept Based
+c_df<-df_comb %>%
+  filter(type == "Concept-based") %>%
+  select(doc_id, prop)
+
+t.test(prop~doc_id , data =c_df)
+
+#Emotion Based
+e_df<-df_comb %>%
+  filter(type == "Emotion-based") %>%
+  select(doc_id, prop)
+
+t.test(prop~doc_id , data =e_df)
+```
+
+```{r, out.width = "20%"}
+#Collapse corpus into n documents, where n is the number of heads of governments in the dataset
+by_leader_dfm <- speech_corpus %>%
+  tokens(remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_remove(stopwords("en")) %>% #padding prevents the formation of non-sense bigrams
+  dfm(groups = "name", remove = c("st"))
+#Scale dfms
+speech_dfm_prop <- dfm_weight(by_leader_dfm, scheme  = "prop")
+#RID  dictionary
+data_dictionary_RID <- data_dictionary_RID
+RID_glory <- data_dictionary_RID$EMOTIONS$GLORY
+RID_order <- data_dictionary_RID$PRIMARY$REGR_KNOL$UNKNOW
+RID_pas <- data_dictionary_RID$PRIMARY$DEFENSIVE_SYMBOL$PASSIVITY
+
+dict <- dictionary(list(Passivity = RID_pas))
+
+#EMOTION
+# Apply dictionary using `dfm_lookup()` function:
+dfm_zoom <- dfm_lookup(speech_dfm_prop, dictionary = dict)
+
+#Create dataframe to get the mean of the proportion of words in each category by leader
+df_zoom <- convert(dfm_zoom, to ="data.frame")
+
+#Create a gender vector
+gender_vect <- df %>% distinct(name, .keep_all = TRUE)
+
+gender_vect <- gender_vect[order(gender_vect$name),]
+
+gender_vect <- gender_vect %>%
+select(gender)
+
+df_zoom <- cbind(df_zoom, gender_vect)
+  
+df_zoom <- df_zoom %>%
+  pivot_longer(!c(doc_id,gender), names_to = "type", values_to = "prop") %>%
+  mutate(gender = as.factor(gender)) %>%
+  select(-doc_id)
+
+#T test to compare differences
+dt_result <- df_zoom %>% group_by(type) %>% do(tidy(t.test(prop~gender, data=.)))
+
+
+ggplot(df_zoom, aes(x=type, y=prop, fill=gender)) + 
+    geom_boxplot() +
+    facet_wrap(~type, scale="free") +
+  scale_fill_manual(values=c("#DA0431", "#56B4E9"))+
+  labs(y= "Proportion of Words", x= "Selected RID Sub-categories", fill = "Gender")+
+  theme_classic()
+```
+
+```{r}
+#Generate DFMs
+speech_dfm_f <- corpus_subset(speech_corpus, gender == "F") %>%
+dfm(remove = stopwords("en"))
+
+speech_dfm_m <- corpus_subset(speech_corpus, gender == "M")%>%
+dfm(remove = stopwords("en"))
+speech_f <- corpus_subset(speech_corpus, gender == "F")
+rel_freq_f <- textstat_frequency(speech_dfm_f)
+rel_freq_m <- textstat_frequency(speech_dfm_m)
+
+# Filter the term "RID_pas"
+rel_freq_f <- subset(rel_freq_f, feature %in% RID_pas)  
+
+rel_freq_m <- subset(rel_freq_m, feature %in% RID_pas)  
+
+# Apply dictionary using `dfm_lookup()` function:
+dfm_zoom <- dfm_lookup(speech_dfm_prop, dictionary = dict)
+
+# Calculate relative frequency by president
+freq_weight <- textstat_frequency(dfm_zoom, n = 7, 
+                                  groups = dfm_zoom$gender)
+
+ggplot(data = freq_weight, aes(x = nrow(freq_weight):1, y = frequency)) +
+     geom_point() +
+     facet_wrap(~ group, scales = "free") +
+     coord_flip() +
+     scale_x_continuous(breaks = nrow(freq_weight):1,
+                        labels = freq_weight$feature) +
+     labs(x = NULL, y = "Relative frequency")
+```
+
+
+
+### 3. Wordfish
+
+```{r}
+#Collapse corpus into n documents, where n is the number of heads of governments in the dataset
+by_leader_dfm <- speech_corpus %>%
+  tokens(remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_remove(stopwords("en"), padding = TRUE) %>% #padding prevents the formation of non-sense bigrams
+  tokens_ngrams(n = 1:2) %>% # up to bigrams
+  dfm(groups = "name", remove = c("st"))
+
+#Convert dfm to df
+by_leader_dfm <- convert(by_leader_dfm, to = "data.frame")
+vector <- c()
+#Remove words that are only used by ONE leader
+for(i in 1:ncol(by_leader_dfm)){
+  if( length(unique(by_leader_dfm[,i])) == 2 & (unique(by_leader_dfm[,4])[1] == 0 | unique(by_leader_dfm[,4])[2]==0)){
+    vector <- c(vector, i)
+  }
+}
+
+by_leader_dfm <- by_leader_dfm[ -vector ]
+leader_name <- by_leader_dfm$doc_id
+#Convert back to dfm
+by_leader_dfm <- as.dfm(by_leader_dfm)
+#rewrite docnames
+docnames(by_leader_dfm) <- leader_name
+by_leader_dfm <- dfm_remove(by_leader_dfm, 'doc_id')
+# fitting wordfish
+wf <- textmodel_wordfish(by_leader_dfm, dir=c(3,2))
+#Create dataframe with the results
+df_wf <- data.frame(wf$docs, wf$theta, wf$se.theta)
+summary(wf)
+textplot_scale1d(wf)
+# looking at results
+sort(predict(wf))
+
+
+# let's look at the word-level parameters
+sw <- data.frame( word=wf$features, beta=wf$beta, psi=wf$psi)
+sw <- sw[order(sw$beta),] # discrimination
+head(sw, n=60)
+tail(sw, n=60)
+
+sw <- sw[order(sw$psi),] # frequency
+head(sw, n=60)
+tail(sw, n=60)
+
+# plotting both into an "Eiffel tower" plot
+plot(wf$beta, wf$psi, type = "n", 
+     xlab = "Word discrimination parameters", 
+     ylab = "Word frequency parameters")
+text(wf$beta, wf$psi, wf$features, col = "grey80", cex = .5)
+
+textplot_scale1d(wf, margin = "features", 
+                 highlighted = c("tremendous", "hopefully", 
+                                 "regulation", "lockdown", "people", "health", "happy", "social_welfare",
+                                  "enough_ventilators", "protect", "emergency", "waiver", "restriction", "alcoholic"))
+```
+#This graph tells us something about the extremes, but we don't know much about the people in the middle 
+
+```{r}
+#Create a gender vector
+gender_vect <- df %>% distinct(name, .keep_all = TRUE)
+
+gender_vect <- gender_vect[order(gender_vect$name),]
+
+gender_vect <- gender_vect %>%
+select(gender)
+
+#Combine the gender vector with the wordfish dataframe
+df_wf <- cbind(df_wf, gender_vect) %>%
+  mutate(gender = as.factor(gender))
+
+#Order the ideology data frame by the speech score
+df_wf <- df_wf[order(df_wf$wf.theta),]
+
+#Create an equally spaced sequence for the y-axis of the points
+my_seq <- seq(0.05625,1.15, by = 0.05625)
+#create the y_axis variable
+df_wf <- df_wf %>%
+  mutate(y_axis = my_seq) %>%
+  mutate(standard_error = wf.se.theta*1.6)
+
+fem_med <- df_wf %>%
+  filter(gender== "F")%>%
+   summarise(wf.theta = median(wf.theta))
+
+male_med <- df_wf %>%
+  filter(gender== "M")%>%
+   summarise(wf.theta = median(wf.theta))
+
+ggplot(df_wf, aes(x=wf.theta, fill=gender, color= gender)) + 
+  #Plot distributions
+  geom_density(alpha=.3, linetype = "blank")+
+  #Plot Senator's twscore
+  geom_point(data=df_wf, 
+             aes(x=wf.theta, y=y_axis, color = gender, fill= gender),
+             size= 0.2)+
+  #plot the range of the senator's twscore
+  geom_pointrange(data=df_wf, mapping=aes(x=wf.theta, y= y_axis, xmin=wf.theta - standard_error, xmax= wf.theta + standard_error, color = gender, fill= gender), width=0.15, size= 0.2)+ 
+  #names that goes to the left
+  geom_text( data= df_wf, aes(x=wf.theta , y= y_axis, label = wf.docs, color = gender, fill = gender),
+            size= 2,
+            vjust = 0, nudge_y = 0.02,
+            check_overlap = T) +
+  scale_fill_manual(values=c("#DA0431", "#56B4E9"))+
+  scale_color_manual(values=c("#DA0431", "#56B4E9"))+
+  theme_classic()+
+  #Remove gap between x-axis and the plot
+  #scale_x_continuous(limits = c(-3,2.5), expand = c(0, 0)) +
+  labs(title="",
+       x ="Position on latent ideological scale")+
+  #remove y-axis
+   theme(legend.position = "none",
+        axis.line.y =element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(), 
+        axis.line.x = element_blank(), 
+        #panel.grid = element_blank(),
+        panel.border = element_blank(), 
+        plot.title = element_text(color="black", size=11, face="bold"))
+
+
+
+```
+```{r}
+library("topicmodels", quietly = TRUE, warn.conflicts = FALSE, verbose = FALSE)
+library(seededlda)
+
+speeches_dfm <- speech_corpus %>%
+  tokens(remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_remove(stopwords("en"), padding = TRUE) %>% #padding prevents the formation of non-sense bigrams
+  tokens_ngrams(n = 1:2) %>% # up to bigrams
+  dfm( remove = c("st", "st_martin"), stem = TRUE, tolower = TRUE)
+#Create dictionary with prnouns
+myThes <- dictionary(list(Economy = c("bankruptcy", "econom*", "market*", "money", "bank*", "stock*", "bond*", "industry, company", "shop*", "unemploy*", "furlough"),
+                          Social_Welfare = c("alcohol*", "welfare", "domestic_violence", "violence", "mental_health", "vulnerable", "pregnant", "elder*"),
+                               Nationalism = c("self-reliant", "nation*", "proud", "foreign_country", "independent"),
+                               Cooperation = c("international_cooperation", "cooperation", "solidarity", "help"), 
+                          Emotional = c("war*", "battle*", "fight", "enem*")))
+
+tmod_slda <- textmodel_seededlda(speeches_dfm, dictionary = myThes)
+terms(tmod_slda, 20)
+tmod_slda
+
+```
+
+
+```{r}
+#Get the most maximum gamma for a given document. That is, the most likely topic for a given SPEECH
+
+#Create name and gender vecto
+df_name_gender <- df %>%
+  select(name, gender)
+#Get theta from LDA
+df_theta <- as.data.frame(tmod_slda[["theta"]])
+#COmbine both dfs
+df_theta <- cbind(df_theta, df_name_gender)%>%
+  relocate(name)
+#Mean value df 
+df_theta <- df_theta%>%
+    group_by(name) %>%
+    mutate(econ_mean= mean(Economy)) %>%
+    mutate(sw_mean= mean(Social_Welfare)) %>%
+  mutate(nat_mean = mean(Nationalism))%>%
+  mutate(coop_mean = mean(Cooperation)) %>%
+  mutate(emo_mean = mean(Emotional))
+df_theta <- df_theta%>%
+  distinct(name, .keep_all = TRUE) %>%
+  select(-c(Economy, Social_Welfare, Nationalism, Cooperation, Emotional))
+
+df_theta <- df_theta %>%
+  pivot_longer(!c(name, gender), names_to = "topic", values_to = "prop")
+
+ggplot(df_theta, aes(fill=topic, y=prop, x=topic)) + 
+    geom_bar(position="dodge", stat="identity") +
+  facet_wrap(~name) +
+  theme_bw()+
+  scale_fill_manual(name = "Topic", labels = c("Cooperation", "Economy","Emotional Appeals" , "Nationalism", "Social Welfare"), values = c("#fdd760", "#ec3e4b", "#018f97", "#e98d20","#ede1b9"))+
+  scale_x_discrete(labels=c("C", "E", "EA","N", "SW"))+
+  labs(x = "", y= "Average Probability of Topic Prevalence Across Speeches")+
+  theme(legend.position="top")
+```
+
+
+```{r}
+#Get the most maximum gamma for a given document. That is, the most likely topic for a given SPEECH
+df_theta2 <- as.data.frame(tmod_slda[["theta"]])
+
+df_theta2 <- df_theta2 %>%
+  rownames_to_column(var = "rowname") %>%
+  cbind(df_name_gender) %>%
+  select(-c(rowname, name))%>%
+  relocate(gender)
+
+#Pivot longer
+df_theta2 <- df_theta2 %>%
+  pivot_longer(!gender, names_to = "topic", values_to = "prop")
+
+#T test to compare differences
+dt_result <- df_theta2 %>% group_by(topic) %>% do(tidy(t.test(prop~gender, data=.)))
+
+#Emotion Based
+e_df<-df_comb %>%
+  filter(type == "Emotion-based") %>%
+  select(doc_id, prop)
+
+t.test(prop~doc_id , data =e_df)
+
+ggplot(df_theta2, aes(x=topic, y=prop, fill=gender)) + 
+    geom_boxplot() +
+    facet_wrap(~topic, scale="free") +
+  scale_fill_manual(values=c("#DA0431", "#56B4E9"))+
+  labs(y= "Probability of Topic Prevalence Across Speeches", x= "Topic", fill = "Gender")+
+  theme_classic()
+```
+
